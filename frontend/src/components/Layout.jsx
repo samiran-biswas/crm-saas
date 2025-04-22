@@ -13,7 +13,6 @@ import {
   LogoutOutlined,
 } from '@ant-design/icons';
 import { useDispatch, useSelector } from 'react-redux';
-import { logout } from '../store/slices/authSlice';
 
 const { Header, Sider, Content } = Layout;
 
@@ -69,7 +68,7 @@ const MainLayout = () => {
         key="logout"
         icon={<LogoutOutlined />}
         onClick={() => {
-          dispatch(logout());
+          // Logout logic here
           navigate('/login');
         }}
       >
@@ -116,4 +115,4 @@ const MainLayout = () => {
   );
 };
 
-export default MainLayout; 
+export default MainLayout;

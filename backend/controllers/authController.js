@@ -1,190 +1,141 @@
-const User = require('../models/User');
-const jwt = require('jsonwebtoken');
+const User = require('../models/user');
+const UserModel = require('../models/userModel');
+const Auth = require('../models/auth');
+const Security = require('../models/security');
+const Preferences = require('../models/preferences');
+const Role = require('../models/role');
+const { generateToken } = require('../utils/jwtUtils');
+const { sendEmail } = require('../utils/emailService'); // You'll implement this
 const crypto = require('crypto');
-const sendEmail = require('../utils/sendEmail');
 
-// @desc    Register user
-// @route   POST /api/auth/register
-// @access  Public
-exports.register = async (req, res, next) => {
+// Register
+exports.register = async (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { firstName, lastName, email, password } = req.body;
 
-    // Create user
-    const user = await User.create({
-      name,
-      email,
-      password
+    const existingUser = await User.findOne({ email });
+    if (existingUser) return res.status(400).json({ message: 'Email already in use' });
+
+    const role = await Role.findOne({ name: 'Admin' });
+
+    const user = await User.create({ firstName, lastName, email, role: role._id });
+
+    const auth = await Auth.create({ password });
+    const security = await Security.create({});
+    const preferences = await Preferences.create({});
+
+    await UserModel.create({
+      userInfo: user._id,
+      authInfo: auth._id,
+      securityInfo: security._id,
+      preferencesInfo: preferences._id
     });
 
-    sendTokenResponse(user, 201, res);
+    const token = auth.generateEmailVerificationToken();
+    await auth.save();
+
+    await sendEmail(email, 'Verify your email', `Your OTP: ${token}`);
+
+    res.status(201).json({ message: 'User registered. Please verify your email.' });
   } catch (err) {
-    next(err);
+    res.status(500).json({ message: err.message });
   }
 };
 
-// @desc    Login user
-// @route   POST /api/auth/login
-// @access  Public
-exports.login = async (req, res, next) => {
+// Email OTP Verification
+exports.verifyEmail = async (req, res) => {
+  try {
+    const { email, otp } = req.body;
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: 'Invalid email' });
+
+    const userModel = await UserModel.findOne({ userInfo: user._id }).populate('authInfo');
+    const auth = userModel.authInfo;
+
+    if (auth.emailVerificationToken !== otp || auth.emailVerificationExpires < Date.now()) {
+      return res.status(400).json({ message: 'Invalid or expired OTP' });
+    }
+
+    user.isEmailVerified = true;
+    auth.emailVerificationToken = undefined;
+    auth.emailVerificationExpires = undefined;
+    await user.save();
+    await auth.save();
+
+    res.status(200).json({ message: 'Email verified successfully' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+};
+
+// Login
+exports.login = async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    // Validate email & password
-    if (!email || !password) {
-      return res.status(400).json({
-        success: false,
-        error: 'Please provide an email and password'
-      });
-    }
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: 'Invalid email or password' });
 
-    // Check for user
-    const user = await User.findOne({ email }).select('+password');
+    const userModel = await UserModel.findOne({ userInfo: user._id }).populate('authInfo');
+    const auth = userModel.authInfo;
 
-    if (!user) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid credentials'
-      });
-    }
+    const isMatch = await auth.comparePassword(password);
+    if (!isMatch) return res.status(400).json({ message: 'Invalid email or password' });
 
-    // Check if password matches
-    const isMatch = await user.matchPassword(password);
+    const token = await auth.generateAuthToken();
 
-    if (!isMatch) {
-      return res.status(401).json({
-        success: false,
-        error: 'Invalid credentials'
-      });
-    }
-
-    sendTokenResponse(user, 200, res);
+    res.status(200).json({ token, user });
   } catch (err) {
-    next(err);
+    res.status(500).json({ message: err.message });
   }
 };
 
-// @desc    Get current logged in user
-// @route   GET /api/auth/me
-// @access  Private
-exports.getMe = async (req, res, next) => {
+// Forgot Password
+exports.forgotPassword = async (req, res) => {
   try {
-    const user = await User.findById(req.user.id);
+    const { email } = req.body;
 
-    res.status(200).json({
-      success: true,
-      data: user
-    });
+    const user = await User.findOne({ email });
+    if (!user) return res.status(400).json({ message: 'Email not found' });
+
+    const userModel = await UserModel.findOne({ userInfo: user._id }).populate('authInfo');
+    const auth = userModel.authInfo;
+
+    const token = auth.generatePasswordResetToken();
+    await auth.save();
+
+    await sendEmail(email, 'Reset your password', `Reset Token: ${token}`);
+
+    res.status(200).json({ message: 'Reset link sent to email' });
   } catch (err) {
-    next(err);
+    res.status(500).json({ message: err.message });
   }
 };
 
-// @desc    Forgot password
-// @route   POST /api/auth/forgotpassword
-// @access  Public
-exports.forgotPassword = async (req, res, next) => {
+// Reset Password
+exports.resetPassword = async (req, res) => {
   try {
-    const user = await User.findOne({ email: req.body.email });
+    const { email, token, newPassword } = req.body;
 
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        error: 'No user found with that email'
-      });
+    const user = await User.findOne({ email });
+    const userModel = await UserModel.findOne({ userInfo: user._id }).populate('authInfo');
+    const auth = userModel.authInfo;
+
+    if (
+      auth.resetPasswordToken !== token ||
+      auth.resetPasswordExpires < Date.now()
+    ) {
+      return res.status(400).json({ message: 'Invalid or expired token' });
     }
 
-    // Get reset token
-    const resetToken = user.getResetPasswordToken();
+    auth.password = newPassword;
+    auth.resetPasswordToken = undefined;
+    auth.resetPasswordExpires = undefined;
 
-    await user.save({ validateBeforeSave: false });
+    await auth.save();
 
-    // Create reset url
-    const resetUrl = `${req.protocol}://${req.get('host')}/api/auth/resetpassword/${resetToken}`;
-
-    const message = `You are receiving this email because you (or someone else) has requested the reset of a password. Please make a PUT request to: \n\n ${resetUrl}`;
-
-    try {
-      await sendEmail({
-        email: user.email,
-        subject: 'Password reset token',
-        message
-      });
-
-      res.status(200).json({ success: true, data: 'Email sent' });
-    } catch (err) {
-      console.error(err);
-      user.resetPasswordToken = undefined;
-      user.resetPasswordExpire = undefined;
-
-      await user.save({ validateBeforeSave: false });
-
-      return res.status(500).json({
-        success: false,
-        error: 'Email could not be sent'
-      });
-    }
+    res.status(200).json({ message: 'Password reset successful' });
   } catch (err) {
-    next(err);
+    res.status(500).json({ message: err.message });
   }
 };
-
-// @desc    Reset password
-// @route   PUT /api/auth/resetpassword/:resettoken
-// @access  Public
-exports.resetPassword = async (req, res, next) => {
-  try {
-    // Get hashed token
-    const resetPasswordToken = crypto
-      .createHash('sha256')
-      .update(req.params.resettoken)
-      .digest('hex');
-
-    const user = await User.findOne({
-      resetPasswordToken,
-      resetPasswordExpire: { $gt: Date.now() }
-    });
-
-    if (!user) {
-      return res.status(400).json({
-        success: false,
-        error: 'Invalid token'
-      });
-    }
-
-    // Set new password
-    user.password = req.body.password;
-    user.resetPasswordToken = undefined;
-    user.resetPasswordExpire = undefined;
-    await user.save();
-
-    sendTokenResponse(user, 200, res);
-  } catch (err) {
-    next(err);
-  }
-};
-
-// Get token from model, create cookie and send response
-const sendTokenResponse = (user, statusCode, res) => {
-  // Create token
-  const token = user.getSignedJwtToken();
-
-  const options = {
-    expires: new Date(
-      Date.now() + process.env.JWT_COOKIE_EXPIRE * 24 * 60 * 60 * 1000
-    ),
-    httpOnly: true
-  };
-
-  if (process.env.NODE_ENV === 'production') {
-    options.secure = true;
-  }
-
-  res
-    .status(statusCode)
-    .cookie('token', token, options)
-    .json({
-      success: true,
-      token
-    });
-}; 

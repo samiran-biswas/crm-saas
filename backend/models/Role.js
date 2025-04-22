@@ -3,73 +3,26 @@ const mongoose = require('mongoose');
 const roleSchema = new mongoose.Schema({
   name: {
     type: String,
+    enum: ['Admin', 'Superadmin', 'Employee'],
     required: true,
-    enum: ['superadmin', 'admin', 'manager', 'employee', 'custom'],
-    default: 'employee'
-  },
-  description: {
-    type: String,
-    required: true
+    unique: true
   },
   permissions: {
-    dashboard: { type: Boolean, default: false },
-    leads: {
-      view: { type: Boolean, default: false },
-      create: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false },
-      delete: { type: Boolean, default: false }
-    },
-    customers: {
-      view: { type: Boolean, default: false },
-      create: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false },
-      delete: { type: Boolean, default: false }
-    },
-    tickets: {
-      view: { type: Boolean, default: false },
-      create: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false },
-      delete: { type: Boolean, default: false }
-    },
-    tasks: {
-      view: { type: Boolean, default: false },
-      create: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false },
-      delete: { type: Boolean, default: false }
-    },
-    meetings: {
-      view: { type: Boolean, default: false },
-      create: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false },
-      delete: { type: Boolean, default: false }
-    },
-    analytics: {
-      view: { type: Boolean, default: false },
-      export: { type: Boolean, default: false }
-    },
-    settings: {
-      view: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false }
-    },
-    users: {
-      view: { type: Boolean, default: false },
-      create: { type: Boolean, default: false },
-      edit: { type: Boolean, default: false },
-      delete: { type: Boolean, default: false }
+    type: Map,
+    of: Boolean,
+    default: {}
+  },
+  organization: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Organization',
+    required: true
+  },
+  isSuperadmin: {
+    type: Boolean,
+    default: false,
+    required: function() {
+      return this.name === 'Superadmin';  // Only Superadmin can have this field
     }
-  },
-  subscriptionLevel: {
-    type: String,
-    enum: ['basic', 'pro', 'enterprise'],
-    default: 'basic'
-  },
-  isActive: {
-    type: Boolean,
-    default: true
-  },
-  isDefault: {
-    type: Boolean,
-    default: false
   },
   createdAt: {
     type: Date,
@@ -81,10 +34,19 @@ const roleSchema = new mongoose.Schema({
   }
 });
 
-// Pre-save middleware to update the updatedAt field
-roleSchema.pre('save', function(next) {
+// Ensure only one Superadmin
+roleSchema.pre('save', async function(next) {
+  if (this.isSuperadmin) {
+    const superAdminCount = await this.constructor.countDocuments({ 
+      isSuperadmin: true, 
+      organization: this.organization 
+    });
+    if (superAdminCount > 0) {
+      throw new Error('Only one Superadmin is allowed per organization');
+    }
+  }
   this.updatedAt = Date.now();
   next();
 });
 
-module.exports = mongoose.model('Role', roleSchema); 
+module.exports = mongoose.model('Role', roleSchema);
